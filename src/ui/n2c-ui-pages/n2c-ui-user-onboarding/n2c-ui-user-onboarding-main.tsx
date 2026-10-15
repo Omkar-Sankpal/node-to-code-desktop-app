@@ -46,9 +46,10 @@ export default function UserOnboarding() {
         <>
           <h1 className="my-3 text-4xl font-medium tracking-tight text-slate-950">Install Ollama</h1>
           <p className="text-slate-600">Ollama runs the models locally, so your code and prompts stay on your device.</p>
-          <div className="my-6 flex justify-between rounded-lg bg-slate-50 p-3 text-slate-600"><span>Ollama installation</span><span>{setup.busy ? 'Installing…' : 'Ready to install'}</span></div>
-          <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-slate-100"><span className={`block h-full bg-emerald-600 ${setup.busy ? 'w-2/3 animate-pulse' : 'w-0'}`} /></div>
+          <div className="my-6 flex justify-between rounded-lg bg-slate-50 p-3 text-slate-600"><span>{setup.progress.status}</span><span>{setup.progress.percent}%</span></div>
+          <div className="mb-4 h-2 overflow-hidden rounded-full bg-slate-100"><span className="block h-full bg-emerald-600 transition-all duration-300" style={{ width: `${setup.progress.percent}%` }} /></div>
           <button className="mt-3 w-full rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-50" onClick={() => void setup.install()} disabled={setup.busy}>{setup.busy ? 'Installing Ollama…' : 'Install Ollama'}</button>
+          {setup.busy && <button className="mt-3 w-full rounded-lg border border-red-200 bg-red-50 px-4 py-3 font-bold text-red-700 hover:bg-red-100" onClick={() => void setup.cancel()}>Cancel installation</button>}
           <button className="mt-3 w-full rounded-lg border border-slate-200 bg-transparent px-4 py-3 font-bold text-slate-700 disabled:opacity-50" onClick={() => void window.ollama.openDownloadPage()} disabled={setup.busy}>Open official download page</button>
         </>
       ) : (
@@ -62,9 +63,9 @@ export default function UserOnboarding() {
               return <button className={`m-0 grid gap-1 rounded-lg border p-3 text-left ${setup.selectedModel === model.id ? 'border-emerald-600 ring-2 ring-emerald-100' : 'border-slate-200'} bg-slate-50 text-slate-800 disabled:cursor-not-allowed disabled:opacity-50`} key={model.id} onClick={() => enabled && setup.setSelectedModel(model.id)} disabled={!enabled || setup.busy}><strong>{model.name}</strong><span className="text-slate-600">{model.description}</span><small className="text-slate-500">{model.quantization} · {model.minimumRamGb} GB RAM minimum{!enabled ? ' · Does not meet device requirements' : ''}</small></button>
             })}
           </div>
-          {setup.busy && <div className="mt-4"><span>Downloading model…</span><pre className="mt-2 max-h-24 overflow-auto whitespace-pre-wrap rounded-lg bg-slate-950 p-2.5 font-mono text-xs text-emerald-200">{setup.progress || 'Contacting Ollama…'}</pre></div>}
-          <div className="my-4 h-1.5 overflow-hidden rounded-full bg-slate-100"><span className="block h-full bg-emerald-600" /></div>
+          {setup.busy && <div className="mt-4"><div className="flex justify-between text-sm text-slate-600"><span>{setup.progress.status}</span><span>{setup.progress.percent}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-100"><span className="block h-full bg-emerald-600 transition-all duration-300" style={{ width: `${setup.progress.percent}%` }} /></div>{setup.progress.total && <p className="mt-2 text-xs text-slate-500">{Math.round((setup.progress.completed ?? 0) / 1024 ** 2)} MB of {Math.round(setup.progress.total / 1024 ** 2)} MB</p>}</div>}
           <button className="mt-3 w-full rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white disabled:opacity-50" onClick={() => void setup.download()} disabled={!setup.selectedModel || setup.busy}>{setup.busy ? 'Downloading…' : 'Download selected model'}</button>
+          {setup.busy && <button className="mt-3 w-full rounded-lg border border-red-200 bg-red-50 px-4 py-3 font-bold text-red-700 hover:bg-red-100" onClick={() => void setup.cancel()}>Cancel download</button>}
         </>
       )}
       {setup.error && <p className="mt-4 text-red-700" role="alert">{setup.error}</p>}

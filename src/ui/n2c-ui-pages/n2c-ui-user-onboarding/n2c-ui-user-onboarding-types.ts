@@ -16,10 +16,19 @@ export interface OllamaStatus {
 export interface OllamaApi {
   getStatus: () => Promise<OllamaStatus>
   install: () => Promise<{ installed: boolean }>
-  pullModel: (modelId: ModelId) => Promise<{ success: boolean; error?: string }>
+  pullModel: (modelId: ModelId) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+  cancelSetup: () => Promise<boolean>
   openDownloadPage: () => Promise<void>
-  onProgress: (callback: (message: string) => void) => () => void
+  onProgress: (callback: (progress: SetupProgress) => void) => () => void
   chat: (modelId: ModelId, messages: ChatMessage[]) => Promise<{ message: ChatMessage }>
+}
+
+export interface SetupProgress {
+  phase: 'checking' | 'not-installed' | 'installing-ollama' | 'starting-ollama' | 'downloading-model' | 'ready' | 'error'
+  percent: number
+  status: string
+  completed?: number
+  total?: number
 }
 
 export interface ChatMessage {

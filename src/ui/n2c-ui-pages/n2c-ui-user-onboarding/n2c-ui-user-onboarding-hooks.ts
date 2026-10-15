@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { ModelId, OllamaStatus, SystemInfo } from './n2c-ui-user-onboarding-types'
+import type { ModelId, OllamaStatus, SetupProgress, SystemInfo } from './n2c-ui-user-onboarding-types'
 
 export function useOllamaSetup() {
   const [status, setStatus] = useState<OllamaStatus | null>(null)
   const [step, setStep] = useState<'account' | 'ollama' | 'model' | 'complete' | 'dashboard'>('account')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [progress, setProgress] = useState('')
+  const [progress, setProgress] = useState<SetupProgress>({ phase: 'checking', percent: 0, status: 'Waiting to check this device…' })
   const [selectedModel, setSelectedModel] = useState<ModelId | null>(() => {
     const savedModel = window.localStorage.getItem('n2c-selected-model')
     return savedModel === 'gemma4-e2b' || savedModel === 'gemma4-e4b' || savedModel === 'qwen3-8b' ? savedModel : null
@@ -47,9 +47,10 @@ export function useOllamaSetup() {
     if (!selectedModel) return
     setBusy(true)
     setError('')
-    setProgress('')
+    setProgress({ phase: 'downloading-model', percent: 0, status: 'Preparing model download…' })
     try {
       const result = await window.ollama.pullModel(selectedModel)
+      if (result.cancelled) return
       if (!result.success) throw new Error(result.error ?? 'Model download failed.')
       window.localStorage.setItem('n2c-selected-model', selectedModel)
       setStep('complete')
@@ -58,6 +59,14 @@ export function useOllamaSetup() {
     } finally {
       setBusy(false)
     }
+
+  }
+
+  const cancel = async () => {
+    if (!busy) return
+    await window.ollama.cancelSetup()
+    setBusy(false)
+    setError('')
   }
 
   const enabledModels = useMemo(() => ({
@@ -79,5 +88,6 @@ export function useOllamaSetup() {
     continueFromAccount,
     install,
     download,
+    cancel,
   }
 }
