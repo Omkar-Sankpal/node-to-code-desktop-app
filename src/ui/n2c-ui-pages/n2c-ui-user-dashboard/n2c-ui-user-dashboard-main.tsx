@@ -1,19 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   addEdge,
-  Background,
-  Controls,
-  MiniMap,
-  ReactFlow,
   useEdgesState,
   useNodesState,
   type Connection,
   type Edge,
-  type Node,
   type NodeMouseHandler,
 } from '@xyflow/react'
-import '@xyflow/react/dist/style.css'
 import type { GeneratedFile, GenerationGraph, GenerationProgress, ModelId } from '../n2c-ui-user-onboarding/n2c-ui-user-onboarding-types'
+import NodeEditor from '../../n2c-ui-node-editor/n2c-ui-node-editor-main'
+import { createWorkflowNode, createWorkflowSubgroup, normalizeProjectGraph } from '../../n2c-ui-node-editor/n2c-ui-node-handler/n2c-ui-node-handler-main'
+import { nodeTemplates, starterGraph, subgroupTemplate, type ApiDefinition, type ProjectGraph, type WorkflowNode } from '../../n2c-ui-node-editor/n2c-ui-node-handler/n2c-ui-node-handler-types'
 
 type Project = {
   id: string
@@ -21,33 +18,17 @@ type Project = {
   updatedAt: string
 }
 
-type ProjectGraph = {
-  nodes: WorkflowNode[]
-  edges: Edge[]
-}
-
-type ApiDefinition = { method: string; path: string; description: string }
-type WorkflowNodeData = { label: string; description: string; kind: string; apis?: ApiDefinition[] }
-type WorkflowNode = Node<WorkflowNodeData>
-
-const starterGraph: ProjectGraph = {
-  nodes: [
-    { id: 'main-file', position: { x: 40, y: 190 }, data: { label: 'Main_file.java', description: 'Application entry point', kind: 'Main file' }, type: 'default' },
-    { id: 'controller', position: { x: 300, y: 190 }, data: { label: 'Controller', description: 'Expose REST APIs and route requests', kind: 'API layer', apis: [{ method: 'GET', path: '/api/items', description: 'List all items' }] }, type: 'default' },
-    { id: 'service', position: { x: 560, y: 190 }, data: { label: 'Service layer', description: 'Keep business logic and application rules', kind: 'Service' }, type: 'default' },
-    { id: 'model', position: { x: 820, y: 190 }, data: { label: 'Model / Repository', description: 'Define entities and repository access', kind: 'Model' }, type: 'default' },
-    { id: 'h2-db', position: { x: 1080, y: 190 }, data: { label: 'H2 database', description: 'Connect to the local H2 database', kind: 'Database' }, type: 'default' },
-  ],
-  edges: [
-    { id: 'main-controller', source: 'main-file', target: 'controller', animated: true },
-    { id: 'controller-service', source: 'controller', target: 'service', animated: true },
-    { id: 'service-model', source: 'service', target: 'model', animated: true },
-    { id: 'model-h2', source: 'model', target: 'h2-db', animated: true },
-  ],
-}
-
 const initialProjects: Project[] = [
   { id: 'starter-project', name: 'Starter project', updatedAt: 'Just now' },
+]
+
+const generationSteps = [
+  { label: 'Project foundation', detail: 'pom.xml and application configuration' },
+  { label: 'Models and repositories', detail: 'Entities and data access contracts' },
+  { label: 'Service layer', detail: 'Business logic connected to models' },
+  { label: 'Controller layer', detail: 'REST endpoints connected to services' },
+  { label: 'Application entry point', detail: 'Demo.java and Spring Boot startup' },
+  { label: 'Compile and verify', detail: 'Maven compilation and repair pass' },
 ]
 
 function readSavedProjects() {
@@ -70,18 +51,11 @@ function readGraph(projectId: string): ProjectGraph {
   if (!saved) return starterGraph
   try {
     const graph = JSON.parse(saved) as ProjectGraph
-    return graph.nodes.some((node) => node.id === 'main-file') ? graph : starterGraph
+    return graph.nodes.some((node) => node.id === 'main-file') ? normalizeProjectGraph(graph) : starterGraph
   } catch {
     return starterGraph
   }
 }
-
-const nodeTemplates = [
-  { kind: 'API layer', label: 'Controller', description: 'Expose REST APIs and route requests' },
-  { kind: 'Service', label: 'Service layer', description: 'Keep business logic and application rules' },
-  { kind: 'Model', label: 'Model / Repository', description: 'Define entities and repository access' },
-  { kind: 'Database', label: 'H2 database', description: 'Connect to the local H2 database' },
-]
 
 export default function UserDashboard({ onOpenChat, modelId }: { onOpenChat?: () => void; modelId?: ModelId }) {
   const [projects, setProjects] = useState(readSavedProjects)
@@ -93,7 +67,6 @@ export default function UserDashboard({ onOpenChat, modelId }: { onOpenChat?: ()
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [projectName, setProjectName] = useState('')
   const [isCreatingProject, setIsCreatingProject] = useState(false)
-  const [showNodeMenu, setShowNodeMenu] = useState(false)
   const [apiDraft, setApiDraft] = useState<ApiDefinition>({ method: 'GET', path: '/api/items', description: '' })
   const [generationState, setGenerationState] = useState<'idle' | 'working' | 'success' | 'error'>('idle')
   const [generationMessage, setGenerationMessage] = useState('')
@@ -123,18 +96,20 @@ export default function UserDashboard({ onOpenChat, modelId }: { onOpenChat?: ()
     setEdges((currentEdges: Edge[]) => addEdge({ ...connection, animated: true }, currentEdges))
   }, [setEdges])
   const onNodeClick: NodeMouseHandler = (_, node) => setSelectedNodeId(node.id)
-  const addNode = (template: typeof nodeTemplates[number]) => {
+  const addNode = (template: typeof nodeTemplates[number], parentId?: string) => {
     nodeSequence.current += 1
-    const id = `${template.kind.toLowerCase().replaceAll(' ', '-')}-${nodeSequence.current}`
-    const nextNode: WorkflowNode = {
-      id,
-      position: { x: 180 + (nodes.length % 3) * 250, y: 80 + Math.floor(nodes.length / 3) * 150 },
-      data: { ...template },
-      type: 'default',
-    }
+    const childNodeCount = nodes.filter((node) => node.parentId === parentId).length
+    const nextNode = createWorkflowNode(template, nodeSequence.current, childNodeCount, parentId)
     setNodes((currentNodes: WorkflowNode[]) => [...currentNodes, nextNode])
-    setSelectedNodeId(id)
-    setShowNodeMenu(false)
+    setSelectedNodeId(nextNode.id)
+  }
+
+  const addSubgroup = (parentId?: string) => {
+    nodeSequence.current += 1
+    const subgroupCount = nodes.filter((node) => node.parentId === parentId && node.type === 'group').length
+    const nextSubgroup = createWorkflowSubgroup(subgroupTemplate, nodeSequence.current, subgroupCount, parentId)
+    setNodes((currentNodes: WorkflowNode[]) => [...currentNodes, nextSubgroup])
+    setSelectedNodeId(nextSubgroup.id)
   }
 
   const updateNode = (field: 'label' | 'description' | 'kind', value: string) => {
@@ -199,6 +174,9 @@ export default function UserDashboard({ onOpenChat, modelId }: { onOpenChat?: ()
   }
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId)
+  const activeGenerationStep = generationProgress
+    ? generationProgress.percent >= 84 ? 5 : Math.min(4, Math.max(0, Math.floor((generationProgress.percent - 10) / 13)))
+    : 0
   const previewFile = generatedProject?.files.find((file) => file.path === previewPath)
   const exportProject = async () => {
     if (!generatedProject) return
@@ -244,26 +222,18 @@ export default function UserDashboard({ onOpenChat, modelId }: { onOpenChat?: ()
           {generationMessage && <div className={`generation-message generation-${generationState}`} role="status">{generationMessage}</div>}
           {generationState === 'working' && generationProgress && <div className="generation-progress"><div className="generation-progress-row"><span>{generationProgress.status}</span><b>{generationProgress.percent}%</b></div><div className="generation-progress-track"><span style={{ width: `${generationProgress.percent}%` }} /></div>{generationProgress.totalFiles && <small>{generationProgress.filesWritten ?? 0} of {generationProgress.totalFiles} files written</small>}</div>}
           {generatedProject && <section className="generated-project-panel"><div className="generated-project-header"><div><span className="eyebrow">Generated project</span><strong>{generatedProject.files.length} files ready</strong></div><div className="generated-project-actions"><button className="secondary-button" type="button" onClick={() => void window.ollama.openProjectFolder(generatedProject.path)}>Open folder</button><button className="secondary-button" type="button" onClick={() => void exportProject()}>Export ZIP</button></div></div><div className="generated-file-list">{generatedProject.files.map((file) => <button className={`generated-file ${file.path === previewPath ? 'generated-file-active' : ''}`} type="button" key={file.path} onClick={() => setPreviewPath(file.path)}><span>◇</span>{file.path}</button>)}</div>{previewFile && <pre className="file-preview"><code>{previewFile.content}</code></pre>}{exportMessage && <p className="export-message">{exportMessage}</p>}</section>}
-          <section className="flow-card" aria-label="React Flow project editor">
-            <div className="flow-toolbar"><span><span className="live-dot" /> Editing canvas</span><span className="toolbar-hint">Drag nodes · Connect handles · Select to edit</span><div className="add-node-wrap"><button className="secondary-button add-node-button" type="button" onClick={() => setShowNodeMenu((current) => !current)}>+ Add node</button>{showNodeMenu && <div className="add-node-menu">{nodeTemplates.map((template) => <button key={template.kind} type="button" onClick={() => addNode(template)}>{template.label}<small>{template.kind}</small></button>)}</div>}</div></div>
-            <div className="flow-canvas">
-              <ReactFlow
-                nodes={nodes}
-                edges={edges}
-                onNodesChange={onNodesChange}
-                onEdgesChange={onEdgesChange}
-                onConnect={onConnect}
-                onNodeClick={onNodeClick}
-                onPaneClick={() => setSelectedNodeId(null)}
-                fitView
-                colorMode="dark"
-              >
-                <Background color="#252a34" gap={22} size={1} />
-                <Controls />
-                <MiniMap nodeColor="#42b883" maskColor="rgba(13, 17, 23, 0.72)" />
-              </ReactFlow>
-            </div>
-          </section>
+          <div className={`node-editor-stage ${generationState === 'working' ? 'node-editor-stage-busy' : ''}`}>
+            <div className="node-editor-content"><NodeEditor nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={onNodeClick} onPaneClick={() => setSelectedNodeId(null)} onAddNode={addNode} onAddSubgroup={addSubgroup} /></div>
+            {generationState === 'working' && generationProgress && <section className="generation-overlay" aria-live="polite" aria-label="Code generation progress">
+              <div className="generation-overlay-header"><span className="generation-overlay-kicker">LLM code generation</span><span className="generation-overlay-percent">{generationProgress.percent}%</span></div>
+              <h2>{generationProgress.status}</h2>
+              <p>Each layer is generated in a fresh context and checked before the next step.</p>
+              <ol className="generation-step-list">
+                {generationSteps.map((step, index) => <li className={index < activeGenerationStep ? 'generation-step-complete' : index === activeGenerationStep ? 'generation-step-active' : ''} key={step.label}><span className="generation-step-marker">{index < activeGenerationStep ? '✓' : index + 1}</span><span><strong>{step.label}</strong><small>{step.detail}</small></span></li>)}
+              </ol>
+              <div className="generation-overlay-track"><span style={{ width: `${generationProgress.percent}%` }} /></div>
+            </section>}
+          </div>
         </main>
 
         <aside className="properties-panel">
