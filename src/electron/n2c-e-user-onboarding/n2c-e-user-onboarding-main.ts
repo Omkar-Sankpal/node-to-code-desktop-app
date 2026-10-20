@@ -9,13 +9,52 @@ const execFileAsync = promisify(execFile)
 const ollamaCommand = process.platform === 'win32' ? 'ollama.exe' : 'ollama'
 export const ollamaApiUrl = 'http://127.0.0.1:11434'
 
-export type ModelId = 'gemma4-e2b' | 'gemma4-e4b' | 'qwen3-8b'
+export type ModelId = string
 export type SetupPhase = 'checking' | 'not-installed' | 'installing-ollama' | 'starting-ollama' | 'downloading-model' | 'ready' | 'error'
 
 export const models: Record<ModelId, { name: string; tag: string }> = {
   'gemma4-e2b': { name: 'Gemma 4 E2B (non-quantized)', tag: 'gemma4:e2b' },
   'gemma4-e4b': { name: 'Gemma 4 E4B (non-quantized)', tag: 'gemma4:e4b' },
-  'qwen3-8b': { name: 'Qwen3 8B (Q4_K_M)', tag: 'qwen3:8b-q4_K_M' },
+  'qwen3-8b': { name: 'Qwen3 8B', tag: 'qwen3:8b' },
+}
+
+export interface OllamaModelOption {
+  id: string
+  name: string
+  tag: string
+  description: string
+  minimumRamGb: number
+  recommendedStorageGb: number
+}
+
+export const modelCatalog: OllamaModelOption[] = [
+  { id: 'qwen3-8b', name: 'Qwen3 8B', tag: 'qwen3:8b', description: 'Strong general-purpose coding and reasoning', minimumRamGb: 8, recommendedStorageGb: 6 },
+  { id: 'qwen3-14b', name: 'Qwen3 14B', tag: 'qwen3:14b', description: 'Higher quality coding and reasoning', minimumRamGb: 14, recommendedStorageGb: 10 },
+  { id: 'qwen2.5-coder-7b', name: 'Qwen2.5 Coder 7B', tag: 'qwen2.5-coder:7b', description: 'Code-focused local assistant', minimumRamGb: 8, recommendedStorageGb: 6 },
+  { id: 'deepseek-coder-v2', name: 'DeepSeek Coder V2', tag: 'deepseek-coder-v2:latest', description: 'Code generation and refactoring', minimumRamGb: 16, recommendedStorageGb: 10 },
+  { id: 'llama3.2-3b', name: 'Llama 3.2 3B', tag: 'llama3.2:3b', description: 'Fast lightweight assistant', minimumRamGb: 8, recommendedStorageGb: 4 },
+  { id: 'gemma3-4b', name: 'Gemma 3 4B', tag: 'gemma3:4b', description: 'Fast compact multimodal model', minimumRamGb: 8, recommendedStorageGb: 4 },
+  { id: 'gemma4-e4b', name: 'Gemma 4 E4B', tag: 'gemma4:e4b', description: 'Latest Gemma coding and reasoning model', minimumRamGb: 12, recommendedStorageGb: 8 },
+  { id: 'gemma4-12b', name: 'Gemma 4 12B', tag: 'gemma4:12b', description: 'Larger Gemma model for higher-quality generation', minimumRamGb: 16, recommendedStorageGb: 12 },
+]
+
+const modelTagAliases: Record<string, string> = {
+  'qwen3:8b-q4_K_M': 'qwen3:8b',
+}
+
+export function normalizeModelTag(tag: string): string {
+  return modelTagAliases[tag] ?? tag
+}
+
+function isSafeModelTag(value: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9._/-]*(?::[a-zA-Z0-9._-]+)?$/.test(value) && !value.includes('..')
+}
+
+export function modelForTag(tag: string): { name: string; tag: string } {
+  tag = normalizeModelTag(tag)
+  if (models[tag]) return models[tag]
+  if (!isSafeModelTag(tag)) throw new Error('Invalid Ollama model tag.')
+  return Object.values(models).find((model) => model.tag === tag) ?? { name: tag, tag }
 }
 
 export interface SetupProgress {
@@ -34,6 +73,11 @@ interface SystemInfo {
 interface PullResult {
   success: boolean
   cancelled?: boolean
+  error?: string
+}
+
+interface DeleteResult {
+  success: boolean
   error?: string
 }
 
@@ -124,10 +168,27 @@ export async function getInstalledModels(): Promise<ModelId[]> {
   const response = await fetch(`${ollamaApiUrl}/api/tags`)
   if (!response.ok) throw new Error(`Could not read installed Ollama models (${response.status}).`)
   const result = (await response.json()) as { models?: Array<{ name?: string }> }
-  const installedNames = new Set((result.models ?? []).map((model) => model.name))
-  return (Object.entries(models) as Array<[ModelId, { tag: string }]>)
-    .filter(([, model]) => installedNames.has(model.tag))
-    .map(([modelId]) => modelId)
+  const installedNames = new Set((result.models ?? []).map((model) => model.name).filter((name): name is string => Boolean(name)))
+  return [...installedNames].map(normalizeModelTag)
+}
+
+export async function deleteModel(modelId: ModelId): Promise<DeleteResult> {
+  const tag = modelForTag(modelId).tag
+  await ensureOllamaRunning()
+  try {
+    const response = await fetch(`${ollamaApiUrl}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: tag }),
+    })
+    if (!response.ok) {
+      const detail = await response.text()
+      return { success: false, error: `Ollama could not delete ${tag} (${response.status}). ${detail}` }
+    }
+    return { success: true }
+  } catch (cause) {
+    return { success: false, error: `Could not connect to Ollama while deleting ${tag}. ${cause instanceof Error ? cause.message : 'Check that Ollama is running.'}` }
+  }
 }
 
 async function installOllama(window: BrowserWindow): Promise<void> {
@@ -172,7 +233,7 @@ async function pullModel(window: BrowserWindow, modelId: ModelId): Promise<PullR
   const response = await fetch(`${ollamaApiUrl}/api/pull`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: models[modelId].tag, stream: true }),
+    body: JSON.stringify({ model: modelForTag(modelId).tag, stream: true }),
     signal: abortController.signal,
   })
   if (!response.ok || !response.body) {
@@ -230,9 +291,42 @@ export function registerOllamaOnboardingHandlers(window: BrowserWindow): void {
     return { installed }
   })
   ipcMain.handle('ollama:pull-model', async (_event, modelId: ModelId) => {
-    if (!(modelId in models)) throw new Error('Unknown model selected.')
+    modelForTag(modelId)
     await ensureOllamaRunning(window)
+    const catalogModel = modelCatalog.find((model) => model.tag === modelForTag(modelId).tag)
+    if (catalogModel) {
+      const system = await getSystemInfo()
+      if (system.ramGb < catalogModel.minimumRamGb) {
+        throw new Error(`${catalogModel.name} requires at least ${catalogModel.minimumRamGb} GB RAM. This device has ${system.ramGb.toFixed(1)} GB.`)
+      }
+      if (system.freeStorageGb < catalogModel.recommendedStorageGb) {
+        throw new Error(`${catalogModel.name} recommends ${catalogModel.recommendedStorageGb} GB free storage. Only ${system.freeStorageGb.toFixed(1)} GB is available.`)
+      }
+    }
     return pullModel(window, modelId)
+  })
+  ipcMain.handle('ollama:delete-model', async (_event, modelId: ModelId) => deleteModel(modelId))
+  ipcMain.handle('ollama:model-library', async () => {
+    const installedTags = await getInstalledModels()
+    const installedSet = new Set(installedTags)
+    const system = await getSystemInfo()
+    const catalogTags = new Set(modelCatalog.map((model) => model.tag))
+    const installedCustomModels: OllamaModelOption[] = installedTags
+      .filter((tag) => !catalogTags.has(tag))
+      .map((tag) => ({ id: tag, name: tag, tag, description: 'Installed Ollama model', minimumRamGb: 0, recommendedStorageGb: 0, installed: true }))
+    return [
+      ...modelCatalog.map((model) => ({
+        ...model,
+        installed: installedSet.has(model.tag),
+        available: system.ramGb >= model.minimumRamGb && system.freeStorageGb >= model.recommendedStorageGb,
+        unavailableReason: system.ramGb < model.minimumRamGb
+          ? `Requires ${model.minimumRamGb} GB RAM`
+          : system.freeStorageGb < model.recommendedStorageGb
+            ? `Needs ${model.recommendedStorageGb} GB free storage`
+            : undefined,
+      })),
+      ...installedCustomModels,
+    ]
   })
   ipcMain.handle('ollama:cancel-setup', () => {
     if (cancelActiveOperation) {

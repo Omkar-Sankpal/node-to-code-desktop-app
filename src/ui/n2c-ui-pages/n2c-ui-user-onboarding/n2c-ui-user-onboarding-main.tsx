@@ -37,7 +37,7 @@ export default function UserOnboarding() {
   const [chatOpen, setChatOpen] = useState(false)
   if (setup.step === 'account') return <main className="m-auto w-[min(680px,calc(100%-48px))] rounded-2xl border border-slate-200 bg-white p-12 text-left shadow-2xl shadow-slate-900/15"><AccountStep onContinue={() => void setup.continueFromAccount()} busy={setup.busy} /></main>
   if (setup.step === 'complete') return <main className="m-auto w-[min(680px,calc(100%-48px))] rounded-2xl border border-slate-200 bg-white p-12 text-left shadow-2xl shadow-slate-900/15"><p className="text-xs font-bold uppercase tracking-[0.12em] text-emerald-600">All set</p><h1 className="my-3 text-4xl font-medium tracking-tight text-slate-950">Your local workspace is ready.</h1><p className="text-slate-600">Ollama and your selected model are installed. You can start building now.</p><button className="mt-4 w-full rounded-lg bg-emerald-600 px-4 py-3 font-bold text-white" onClick={() => setup.setStep('dashboard')}>Open dashboard</button></main>
-  if (setup.step === 'dashboard') return <><UserDashboard modelId={setup.selectedModel ?? undefined} onOpenChat={setup.selectedModel ? () => setChatOpen(true) : undefined} />{chatOpen && setup.selectedModel && <UserChatbox modelId={setup.selectedModel} onClose={() => setChatOpen(false)} />}</>
+  if (setup.step === 'dashboard') return <><UserDashboard modelId={setup.selectedModel ?? undefined} onModelChange={setup.selectModel} onOpenChat={setup.selectedModel ? () => setChatOpen(true) : undefined} />{chatOpen && setup.selectedModel && <UserChatbox modelId={setup.selectedModel} onClose={() => setChatOpen(false)} />}</>
 
   const system = setup.status?.system
   return (

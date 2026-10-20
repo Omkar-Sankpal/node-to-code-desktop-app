@@ -9,7 +9,11 @@ export function useOllamaSetup() {
   const [progress, setProgress] = useState<SetupProgress>({ phase: 'checking', percent: 0, status: 'Waiting to check this device…' })
   const [selectedModel, setSelectedModel] = useState<ModelId | null>(() => {
     const savedModel = window.localStorage.getItem('n2c-selected-model')
-    return savedModel === 'gemma4-e2b' || savedModel === 'gemma4-e4b' || savedModel === 'qwen3-8b' ? savedModel : null
+    if (savedModel === 'qwen3:8b-q4_K_M') {
+      window.localStorage.setItem('n2c-selected-model', 'qwen3:8b')
+      return 'qwen3:8b'
+    }
+    return savedModel?.trim() || null
   })
 
   useEffect(() => window.ollama.onProgress(setProgress), [])
@@ -62,6 +66,11 @@ export function useOllamaSetup() {
 
   }
 
+  const selectModel = (model: ModelId) => {
+    setSelectedModel(model)
+    window.localStorage.setItem('n2c-selected-model', model)
+  }
+
   const cancel = async () => {
     if (!busy) return
     await window.ollama.cancelSetup()
@@ -83,6 +92,7 @@ export function useOllamaSetup() {
     error,
     progress,
     selectedModel,
+    selectModel,
     setSelectedModel,
     enabledModels,
     continueFromAccount,

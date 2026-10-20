@@ -1,5 +1,5 @@
 export type OnboardingStep = 'account' | 'ollama' | 'model' | 'complete' | 'dashboard'
-export type ModelId = 'gemma4-e2b' | 'gemma4-e4b' | 'qwen3-8b'
+export type ModelId = string
 
 export interface SystemInfo {
   ramGb: number
@@ -17,14 +17,44 @@ export interface OllamaApi {
   getStatus: () => Promise<OllamaStatus>
   install: () => Promise<{ installed: boolean }>
   pullModel: (modelId: ModelId) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+  deleteModel: (modelId: ModelId) => Promise<{ success: boolean; error?: string }>
+  getModelLibrary: () => Promise<OllamaModelOption[]>
   cancelSetup: () => Promise<boolean>
   openDownloadPage: () => Promise<void>
   onProgress: (callback: (progress: SetupProgress) => void) => () => void
   chat: (modelId: ModelId, messages: ChatMessage[]) => Promise<{ message: ChatMessage }>
-  generateProject: (modelId: ModelId, projectName: string, graph: GenerationGraph) => Promise<{ projectPath: string; files: GeneratedFile[]; editorOpened: boolean; editorMessage?: string }>
+  prepareProject: (projectName: string, dependencies: SpringDependency[]) => Promise<SpringStructurePreview>
+  generateProject: (modelId: ModelId, projectName: string, graph: GenerationGraph, projectPath: string, structure: Omit<SpringStructurePreview, 'projectPath'>) => Promise<{ projectPath: string; files: GeneratedFile[]; editorOpened: boolean; editorMessage?: string }>
   onGenerationProgress: (callback: (progress: GenerationProgress) => void) => () => void
   openProjectFolder: (projectPath: string) => Promise<void>
   exportProjectZip: (projectPath: string) => Promise<string>
+}
+
+export interface OllamaModelOption {
+  id: string
+  name: string
+  tag: string
+  description: string
+  minimumRamGb: number
+  recommendedStorageGb: number
+  installed: boolean
+  available?: boolean
+  unavailableReason?: string
+}
+
+export interface SpringStructurePreview {
+  projectPath: string
+  packageName: string
+  files: Array<{ path: string; content: string }>
+  directories: string[]
+  dependencies: SpringDependency[]
+}
+
+export interface SpringDependency {
+  groupId: string
+  artifactId: string
+  version?: string
+  scope?: string
 }
 
 export interface GenerationGraph {
