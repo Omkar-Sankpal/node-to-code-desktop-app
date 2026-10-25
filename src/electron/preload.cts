@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld('ollama', {
     ipcRenderer.on('ollama:setup-progress', listener)
     return () => ipcRenderer.removeListener('ollama:setup-progress', listener)
   },
-  chat: (modelId: string, messages: Array<{ role: 'user' | 'assistant'; content: string }>) =>
+  chat: (modelId: string, messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>) =>
     ipcRenderer.invoke('ollama:chat', modelId, messages),
   prepareProject: (projectName: string, dependencies: Array<{ groupId: string; artifactId: string; version?: string; scope?: string }>) =>
     ipcRenderer.invoke('project:prepare', projectName, dependencies),

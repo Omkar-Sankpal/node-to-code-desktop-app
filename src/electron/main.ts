@@ -11,7 +11,7 @@ const electronDirectory = path.dirname(fileURLToPath(import.meta.url))
 const execFileAsync = promisify(execFile)
 
 interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant'
   content: string
 }
 
@@ -26,6 +26,11 @@ interface GenerationNode {
     description?: string
     kind?: string
     apis?: Array<{ method: string; path: string; description: string }>
+    apiContracts?: Array<{ method: string; path: string; description: string; requestBody?: string; responseType?: string; pathParams?: string[]; queryParams?: string[] }>
+    entityFields?: Array<{ name: string; type: string; constraints?: string[]; relationship?: { type: string; target: string; mappedBy?: string } }>
+    serviceMethods?: Array<{ name: string; description: string; params?: string; returnType?: string; dependencies?: string[] }>
+    configEntries?: Array<{ key: string; value?: string; description?: string }>
+    packagePath?: string
   }
 }
 
@@ -276,7 +281,7 @@ function registerChatHandler(): void {
   ipcMain.handle('ollama:chat', (_event, modelId: ModelId, messages: ChatMessage[]) => {
     modelForTag(modelId)
     if (!Array.isArray(messages) || messages.some((message) => (
-      !message || !['user', 'assistant'].includes(message.role) || typeof message.content !== 'string'
+      !message || !['system', 'user', 'assistant'].includes(message.role) || typeof message.content !== 'string'
     ))) {
       throw new Error('Invalid chat messages.')
     }
@@ -365,7 +370,34 @@ function stageContext(files: GeneratedFile[]): string {
   return files.map((file) => `FILE: ${file.path}\n${file.content}`).join('\n\n').slice(-60_000)
 }
 
+function buildContractSection(graph: GenerationGraph): string {
+  const lines: string[] = []
+  for (const node of graph.nodes) {
+    if (!node.data) continue
+    const parts: string[] = []
+    if (node.data.entityFields?.length) {
+      parts.push(`  Entity fields: ${node.data.entityFields.map(f => `${f.name}: ${f.type}${f.constraints?.length ? ` [${f.constraints.join(', ')}]` : ''}${f.relationship ? ` → ${f.relationship.type} ${f.relationship.target}` : ''}`).join('; ')}`)
+    }
+    if (node.data.apiContracts?.length) {
+      parts.push(`  API contracts: ${node.data.apiContracts.map(a => `${a.method} ${a.path}${a.requestBody ? ` body:${a.requestBody}` : ''}${a.responseType ? ` → ${a.responseType}` : ''}`).join('; ')}`)
+    }
+    if (node.data.serviceMethods?.length) {
+      parts.push(`  Service methods: ${node.data.serviceMethods.map(m => `${m.returnType ?? 'void'} ${m.name}(${m.params ?? ''}) — ${m.description}`).join('; ')}`)
+    }
+    if (node.data.configEntries?.length) {
+      parts.push(`  Config: ${node.data.configEntries.map(c => `${c.key}=${c.value ?? '<required>'}`).join('; ')}`)
+    }
+    if (parts.length > 0) {
+      lines.push(`Node "${node.data.label}" (${node.data.kind}):`)
+      lines.push(...parts)
+    }
+  }
+  if (lines.length === 0) return ''
+  return `\n\nNode contracts (implement these exactly):\n${lines.join('\n')}`
+}
+
 function buildStagePrompt(stage: GenerationStage, graph: GenerationGraph, files: GeneratedFile[], structure: SpringStructureManifest, springBootVersion: string): string {
+  const contractSection = buildContractSection(graph)
   return `You are generating one stage of a Spring Boot project. This is a fresh context window: do not assume any earlier chat messages.
 
 Stage: ${stage.name}
@@ -378,9 +410,11 @@ Project contract:
 - Spring Initializr created the authoritative folder structure. Add files only inside directories already present or in directories required by the graph.
 - Generate graph-specific code only under src/main/java or src/test. Do not create root-level files or replace Initializr files.
 - Preserve names and API paths from the visual graph.
+- When node contracts specify entity fields, use exactly those field names and types. When API contracts specify request/response types, implement them precisely.
 - Return exactly one valid JSON object: {"files":[{"path":"relative/path","content":"file contents"}]}.
 - Return only files for this stage. Never return markdown fences, explanations, or text outside the JSON object.
 - Paths must be relative and use forward slashes.
+${contractSection}
 
 Visual graph:
 ${JSON.stringify(graph, null, 2)}

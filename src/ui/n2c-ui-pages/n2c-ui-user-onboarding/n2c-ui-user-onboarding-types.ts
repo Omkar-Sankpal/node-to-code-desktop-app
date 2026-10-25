@@ -65,9 +65,59 @@ export interface GenerationGraph {
       description?: string
       kind?: string
       apis?: Array<{ method: string; path: string; description: string }>
+      apiContracts?: Array<{ method: string; path: string; description: string; requestBody?: string; responseType?: string; pathParams?: string[]; queryParams?: string[] }>
+      entityFields?: Array<{ name: string; type: string; constraints?: string[]; relationship?: { type: string; target: string; mappedBy?: string } }>
+      serviceMethods?: Array<{ name: string; description: string; params?: string; returnType?: string; dependencies?: string[] }>
+      configEntries?: Array<{ key: string; value?: string; description?: string }>
+      packagePath?: string
     }
+
   }>
   edges: Array<{ source: string; target: string }>
+}
+
+export type PromptNodeType = 'service' | 'controller' | 'database' | 'external-system' | 'queue' | 'group'
+export type PromptArchitecture = 'monolith' | 'modular-monolith' | 'microservices'
+
+export interface PromptDesignApi {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  path: string
+  description: string
+}
+
+export interface PromptDesignNode {
+  id: string
+  type: PromptNodeType
+  label: string
+  description: string
+  responsibilities: string[]
+  technology?: string
+  apis?: PromptDesignApi[]
+  parentId?: string
+  entityFields?: Array<{ name: string; type: string; constraints?: string[]; relationship?: { type: string; target: string; mappedBy?: string } }>
+  apiContracts?: Array<{ method: string; path: string; description: string; requestBody?: string; responseType?: string; pathParams?: string[]; queryParams?: string[] }>
+  serviceMethods?: Array<{ name: string; description: string; params?: string; returnType?: string; dependencies?: string[] }>
+  configEntries?: Array<{ key: string; value?: string; description?: string }>
+}
+
+export interface PromptDesignEdge {
+  source: string
+  target: string
+  label?: string
+  protocol?: string
+}
+
+export interface PromptProjectDesign {
+  projectName: string
+  summary: string
+  architecture: PromptArchitecture
+  framework: 'spring-boot'
+  packageName?: string
+  nodes: PromptDesignNode[]
+  edges: PromptDesignEdge[]
+  dependencies: SpringDependency[]
+  assumptions: string[]
+  clarificationQuestions: string[]
 }
 
 export interface GeneratedFile {
@@ -92,7 +142,7 @@ export interface SetupProgress {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant'
+  role: 'system' | 'user' | 'assistant'
   content: string
 }
 

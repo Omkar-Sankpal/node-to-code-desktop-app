@@ -1,7 +1,66 @@
 import { Position, type Edge, type Node } from '@xyflow/react'
 
+/* ── Entity contract (Model / JPA nodes) ── */
+
+export interface EntityField {
+  name: string
+  type: string
+  constraints?: string[]
+  relationship?: {
+    type: 'OneToOne' | 'OneToMany' | 'ManyToOne' | 'ManyToMany'
+    target: string
+    mappedBy?: string
+  }
+}
+
+/* ── API contract (Controller nodes) ── */
+
+export interface ApiContract {
+  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  path: string
+  description: string
+  requestBody?: string
+  responseType?: string
+  pathParams?: string[]
+  queryParams?: string[]
+}
+
+/* ── Service contract (Service nodes) ── */
+
+export interface ServiceMethod {
+  name: string
+  description: string
+  params?: string
+  returnType?: string
+  dependencies?: string[]
+}
+
+/* ── Config contract (Configuration nodes) ── */
+
+export interface ConfigEntry {
+  key: string
+  value?: string
+  description?: string
+}
+
+/* ── Backward-compatible alias ── */
+
 export type ApiDefinition = { method: string; path: string; description: string }
-export type WorkflowNodeData = { label: string; description: string; kind: string; apis?: ApiDefinition[] }
+
+/* ── Node data ── */
+
+export type WorkflowNodeData = {
+  label: string
+  description: string
+  kind: string
+  apis?: ApiDefinition[]
+  apiContracts?: ApiContract[]
+  entityFields?: EntityField[]
+  serviceMethods?: ServiceMethod[]
+  configEntries?: ConfigEntry[]
+  packagePath?: string
+}
+
 export type WorkflowNode = Node<WorkflowNodeData>
 export type ProjectGraph = { nodes: WorkflowNode[]; edges: Edge[] }
 export type NodeTemplate = Pick<WorkflowNodeData, 'kind' | 'label' | 'description'>
