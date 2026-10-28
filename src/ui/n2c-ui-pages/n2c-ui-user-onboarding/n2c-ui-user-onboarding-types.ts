@@ -28,6 +28,8 @@ export interface OllamaApi {
   onGenerationProgress: (callback: (progress: GenerationProgress) => void) => () => void
   openProjectFolder: (projectPath: string) => Promise<void>
   exportProjectZip: (projectPath: string) => Promise<string>
+  compileProject: (projectPath: string) => Promise<{ success: boolean; available: boolean; diagnostics: Array<{ file: string; line?: number; message: string; severity: 'error' | 'warning' }>; rawOutput: string }>
+  loadProjectGraph?: (projectPath: string) => Promise<{ projectName: string; packageName: string; generatedAt: string; nodes: any[]; edges: any[]; dependencies: SpringDependency[] } | null>
 }
 
 export interface OllamaModelOption {
@@ -76,7 +78,7 @@ export interface GenerationGraph {
   edges: Array<{ source: string; target: string }>
 }
 
-export type PromptNodeType = 'service' | 'controller' | 'database' | 'external-system' | 'queue' | 'group'
+export type PromptNodeType = 'service' | 'controller' | 'database' | 'external-system' | 'queue' | 'group' | 'entity' | 'model'
 export type PromptArchitecture = 'monolith' | 'modular-monolith' | 'microservices'
 
 export interface PromptDesignApi {

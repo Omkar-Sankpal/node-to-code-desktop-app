@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { ActivityView, BottomPanelTab, EditorTab } from './n2c-ui-ide-types'
+import type { ActivityView, BottomPanelTab, BuildResult, EditorTab } from './n2c-ui-ide-types'
 import { IDEContext } from './n2c-ui-ide-context-value'
 
 const defaultTab: EditorTab = { id: 'welcome', label: 'Welcome', kind: 'home' }
@@ -13,6 +13,8 @@ export default function IDEProvider({ children }: { children: ReactNode }) {
   const [tabs, setTabs] = useState<EditorTab[]>([defaultTab])
   const [activeTabId, setActiveTabId] = useState(defaultTab.id)
   const [outputLines, setOutputLines] = useState<string[]>([])
+  const [buildResult, setBuildResult] = useState<BuildResult | null>(null)
+  const [repairingBuild, setRepairingBuild] = useState(false)
 
   const toggleSidebar = useCallback(() => setSidebarCollapsed(prev => !prev), [])
   const toggleInspector = useCallback(() => setInspectorCollapsed(prev => !prev), [])
@@ -60,12 +62,15 @@ export default function IDEProvider({ children }: { children: ReactNode }) {
     bottomPanelTab, setBottomPanelTab,
     tabs, activeTabId, openTab, closeTab, setActiveTab: setActiveTabId,
     outputLines, addOutputLine, clearOutput,
+    buildResult, setBuildResult,
+    repairingBuild, setRepairingBuild,
   }), [
     activeView, sidebarCollapsed, inspectorCollapsed, bottomPanelCollapsed,
-    bottomPanelTab, tabs, activeTabId, outputLines,
+    bottomPanelTab, tabs, activeTabId, outputLines, buildResult, repairingBuild,
     toggleSidebar, toggleInspector, toggleBottomPanel, openTab, closeTab,
     addOutputLine, clearOutput,
   ])
 
   return <IDEContext value={value}>{children}</IDEContext>
 }
+

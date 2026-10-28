@@ -28,4 +28,7 @@ contextBridge.exposeInMainWorld('ollama', {
   },
   openProjectFolder: (projectPath: string) => ipcRenderer.invoke('project:open-folder', projectPath),
   exportProjectZip: (projectPath: string) => ipcRenderer.invoke('project:export-zip', projectPath),
+  compileProject: (projectPath: string) => ipcRenderer.invoke('project:compile', projectPath),
+  loadProjectGraph: (projectPath: string) => ipcRenderer.invoke('project:load-graph', projectPath),
 })
+

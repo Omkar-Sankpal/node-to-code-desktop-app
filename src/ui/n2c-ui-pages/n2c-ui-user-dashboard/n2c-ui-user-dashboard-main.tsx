@@ -180,7 +180,7 @@ function readGraph(projectId: string): ProjectGraph {
   if (!saved) return starterGraph
   try {
     const graph = JSON.parse(saved) as ProjectGraph
-    return graph.nodes.some((node) => node.id === 'main-file') ? normalizeProjectGraph(graph) : starterGraph
+    return Array.isArray(graph.nodes) && graph.nodes.length > 0 ? normalizeProjectGraph(graph) : starterGraph
   } catch {
     return starterGraph
   }
@@ -221,6 +221,7 @@ export default function UserDashboard({ onOpenChat, modelId, onModelChange }: { 
   const nodeSequence = useRef(0)
   const lastGenerationPercent = useRef(0)
   const ide = useIDE()
+  const { setBuildResult, setRepairingBuild, setBottomPanelTab, bottomPanelCollapsed, toggleBottomPanel } = ide
 
   useEffect(() => {
     window.localStorage.setItem('n2c-projects', JSON.stringify(projects))
@@ -313,34 +314,70 @@ export default function UserDashboard({ onOpenChat, modelId, onModelChange }: { 
     }
     setPromptState('analyzing')
     setPromptError('')
-    try {
-      const firstResponse = await window.ollama.chat(modelId, [
+
+    const attempts = [
+      // Attempt 1: Normal prompt
+      () => window.ollama.chat(modelId, [
         { role: 'system', content: designSystemPrompt },
         { role: 'user', content: prompt },
-      ])
-      let design: PromptProjectDesign
+      ]),
+      // Attempt 2: Repair with error feedback (set dynamically)
+      null as (() => Promise<{ message: { content: string } }>) | null,
+      // Attempt 3: Ultra-simplified prompt
+      () => window.ollama.chat(modelId, [
+        { role: 'system', content: 'Return ONLY a valid JSON object. No markdown, no explanation.' },
+        { role: 'user', content: `Create a Spring Boot project design as JSON for: "${prompt}"\n\nRequired JSON shape: {"projectName":"string","summary":"string","architecture":"monolith","framework":"spring-boot","nodes":[{"id":"string","type":"group|service|controller|database","label":"string","description":"string","responsibilities":[]}],"edges":[{"source":"id","target":"id"}],"dependencies":[{"groupId":"org.springframework.boot","artifactId":"spring-boot-starter-web"}],"assumptions":[],"clarificationQuestions":[]}` },
+      ]),
+    ]
+
+    let lastError = ''
+    let lastResponse = ''
+
+    for (let attempt = 0; attempt < attempts.length; attempt++) {
       try {
-        design = validatePromptProjectDesign(normalizeDesignResponse(parseDesignResponse(firstResponse.message.content)))
-      } catch (validationCause) {
-        const validationMessage = validationCause instanceof Error ? validationCause.message : 'The response did not match the design schema.'
-        const repairResponse = await window.ollama.chat(modelId, [
-          { role: 'system', content: `${designSystemPrompt}\nRepair the supplied response. Return corrected JSON only. The hard limits are at most 80 nodes and 160 edges. Combine related items rather than dropping required Spring Boot layers.` },
-          { role: 'user', content: `Invalid response:\n${firstResponse.message.content}\nValidation errors:\n${validationMessage}` },
-        ])
-        design = validatePromptProjectDesign(normalizeDesignResponse(parseDesignResponse(repairResponse.message.content)))
+        // For attempt 2, dynamically create the repair prompt using the last error
+        if (attempt === 1) {
+          attempts[1] = () => window.ollama.chat(modelId, [
+            { role: 'system', content: 'Fix the JSON below. Return ONLY corrected JSON, no explanation.' },
+            { role: 'user', content: `This JSON was invalid: ${lastError}\n\nOriginal response:\n${lastResponse.slice(0, 3000)}` },
+          ])
+        }
+
+        const attemptFn = attempts[attempt]
+        if (!attemptFn) continue
+
+        const response = await attemptFn()
+        lastResponse = response.message.content
+
+        const parsed = parseDesignResponse(lastResponse)
+        const normalized = normalizeDesignResponse(parsed)
+        const design = validatePromptProjectDesign(normalized)
+        const graph = mapDesignToGraph(design)
+
+        setPromptDesign(design)
+        setNodes(graph.nodes)
+        setEdges(graph.edges)
+        window.localStorage.setItem(projectGraphKey(activeProject.id), JSON.stringify(graph))
+        if (design.projectName && activeProject.name === 'Starter project') { setProjects(prev => prev.map(p => p.id === activeProject.id ? { ...p, name: design.projectName } : p)) }
+        const selectedDependencies = dependencyList(design.dependencies)
+        if (selectedDependencies.length) setInitializerDependencies(selectedDependencies)
+        setPromptState('idle')
+        setGenerationState('idle')
+        setGenerationMessage(
+          attempt > 0
+            ? `Design ready (recovered on attempt ${attempt + 1}): ${graph.nodes.length} nodes and ${graph.edges.length} connections.`
+            : `Design ready: ${graph.nodes.length} nodes and ${graph.edges.length} connections. Review the canvas before generating code.`
+        )
+        return // success
+      } catch (cause) {
+        lastError = cause instanceof Error ? cause.message : 'Invalid response'
+        if (attempt === attempts.length - 1) {
+          // All attempts failed
+          setPromptState('error')
+          setPromptError(`Could not generate a valid design after ${attempts.length} attempts. Last error: ${lastError}`)
+        }
+        // else try next attempt
       }
-      const graph = mapDesignToGraph(design)
-      setPromptDesign(design)
-      setNodes(graph.nodes)
-      setEdges(graph.edges)
-      const selectedDependencies = dependencyList(design.dependencies)
-      if (selectedDependencies.length) setInitializerDependencies(selectedDependencies)
-      setPromptState('idle')
-      setGenerationState('idle')
-      setGenerationMessage(`Design ready: ${graph.nodes.length} nodes and ${graph.edges.length} connections. Review the canvas before generating code.`)
-    } catch (cause) {
-      setPromptState('error')
-      setPromptError(cause instanceof Error ? cause.message : 'The local model could not create a valid project design.')
     }
   }
 
@@ -394,6 +431,7 @@ export default function UserDashboard({ onOpenChat, modelId, onModelChange }: { 
       const graph: GenerationGraph = promptDesign
         ? designToGenerationGraph({ nodes, edges })
         : { nodes, edges: edges.map((edge) => ({ source: edge.source, target: edge.target })) }
+      window.localStorage.setItem(projectGraphKey(activeProject.id), JSON.stringify({ nodes, edges }))
       const generationName = promptDesign?.projectName || (activeProject.name === 'Starter project' ? 'demo' : activeProject.name)
       const { projectPath, ...structure } = structurePreview
       const result = await window.ollama.generateProject(modelId, generationName, graph, projectPath, structure)
@@ -402,6 +440,8 @@ export default function UserDashboard({ onOpenChat, modelId, onModelChange }: { 
       setGenerationMessage(result.editorOpened
         ? `Created ${result.files.length} files and opened ${generationName} in VS Code.`
         : `Created ${result.files.length} files in ${result.projectPath}. ${result.editorMessage ?? 'Open the folder manually.'}`)
+      // Auto compile & build phase is skipped per user request to keep generated files immediately ready.
+      // Users can manually trigger compilation anytime using the "Re-run build" button.
     } catch (cause) {
       setGenerationState('error')
       setGenerationProgress({ phase: 'error', percent: lastGenerationPercent.current, status: 'Generation failed.' })
@@ -549,7 +589,7 @@ export default function UserDashboard({ onOpenChat, modelId, onModelChange }: { 
           </section>
           {generationMessage && <div className={`generation-message generation-${generationState}`} role="status">{generationMessage}</div>}
           {generationState === 'working' && generationProgress && !structurePreview && <div className="generation-progress"><div className="generation-progress-row"><span>{generationProgress.status}</span><b>{generationProgress.percent}%</b></div><div className="generation-progress-track"><span style={{ width: `${generationProgress.percent}%` }} /></div>{generationProgress.totalFiles && <small>{generationProgress.filesWritten ?? 0} of {generationProgress.totalFiles} files written</small>}</div>}
-          {generatedProject && <section className="generated-project-panel"><div className="generated-project-header"><div><span className="eyebrow">Generated project</span><strong>{generatedProject.files.length} files ready</strong></div><div className="generated-project-actions"><button className="secondary-button" type="button" onClick={() => void window.ollama.openProjectFolder(generatedProject.path)}>Open folder</button><button className="secondary-button" type="button" onClick={() => void exportProject()}>Export ZIP</button></div></div><div className="generated-file-list">{generatedProject.files.map((file) => <button className={`generated-file ${file.path === previewPath ? 'generated-file-active' : ''}`} type="button" key={file.path} onClick={() => setPreviewPath(file.path)}><span>◇</span>{file.path}</button>)}</div>{previewFile && <pre className="file-preview"><code>{previewFile.content}</code></pre>}{exportMessage && <p className="export-message">{exportMessage}</p>}</section>}
+          {generatedProject && <section className="generated-project-panel"><div className="generated-project-header"><div><span className="eyebrow">Generated project</span><strong>{generatedProject.files.length} files ready</strong></div><div className="generated-project-actions"><button className="secondary-button" type="button" onClick={() => void window.ollama.openProjectFolder(generatedProject.path)}>Open folder</button><button className="secondary-button" type="button" onClick={() => void exportProject()}>Export ZIP</button><button className="secondary-button" type="button" onClick={async () => { try { setRepairingBuild(true); setBottomPanelTab('build'); if (bottomPanelCollapsed) toggleBottomPanel(); const result = await window.ollama.compileProject(generatedProject.path); setBuildResult(result) } catch { /* skip */ } finally { setRepairingBuild(false) } }}>Re-run build</button></div></div><div className="generated-file-list">{generatedProject.files.map((file) => <button className={`generated-file ${file.path === previewPath ? 'generated-file-active' : ''}`} type="button" key={file.path} onClick={() => setPreviewPath(file.path)}><span>◇</span>{file.path}</button>)}</div>{previewFile && <pre className="file-preview"><code>{previewFile.content}</code></pre>}{exportMessage && <p className="export-message">{exportMessage}</p>}</section>}
           <div className={`node-editor-stage ${generationState === 'working' ? 'node-editor-stage-busy' : ''}`}>
             <div className="node-editor-content"><NodeEditor nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} onNodeClick={onNodeClick} onPaneClick={() => setSelectedNodeId(null)} onAddNode={addNode} onAddSubgroup={addSubgroup} /></div>
             {structurePreview && <section className="generation-overlay structure-preview-overlay" role="dialog" aria-labelledby="structure-preview-title"><div className="structure-preview-header"><div>            <span className="eyebrow">Step 2 of 3 · Spring Initializr</span><h2 id="structure-preview-title">Review generated starter</h2><p>This directory tree comes from Spring Initializr. Confirm it before the LLM generates graph-specific files.</p></div><button className="text-button" type="button" onClick={() => { setStructurePreview(null); setGenerationState('idle'); setGenerationProgress(null) }}>Cancel</button></div><div className="structure-preview-path">{structurePreview.projectPath}<br /><span>Package: {structurePreview.packageName}</span></div><ul className="structure-preview-tree">{buildStructureTree(structurePreview.directories).map((node) => <StructureTreeItem key={node.path} node={node} />)}</ul>            <div className="dependency-editor"><strong>Dependencies installed by Spring Initializr</strong>{structurePreview.dependencies.map((dependency) => <div className="dependency-row" key={`${dependency.groupId}:${dependency.artifactId}`}><span>{dependency.groupId}:{dependency.artifactId}{dependency.scope ? ` (${dependency.scope})` : ''}</span></div>)}</div><div className="structure-preview-actions"><button className="secondary-button" type="button" onClick={() => { setStructurePreview(null); setGenerationState('idle'); setGenerationProgress(null) }}>Cancel</button><button className="primary-button" type="button" onClick={() => void confirmStructure()}>Confirm and continue</button></div></section>}

@@ -1,5 +1,5 @@
 import { createContext } from 'react'
-import type { ActivityView, BottomPanelTab, EditorTab } from './n2c-ui-ide-types'
+import type { ActivityView, BottomPanelTab, BuildResult, EditorTab } from './n2c-ui-ide-types'
 
 export interface IDEContextValue {
   activeView: ActivityView
@@ -20,6 +20,10 @@ export interface IDEContextValue {
   outputLines: string[]
   addOutputLine: (line: string) => void
   clearOutput: () => void
+  buildResult: BuildResult | null
+  setBuildResult: (result: BuildResult | null) => void
+  repairingBuild: boolean
+  setRepairingBuild: (repairing: boolean) => void
 }
 
 export const IDEContext = createContext<IDEContextValue | null>(null)

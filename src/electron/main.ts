@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { ensureOllamaRunning, getInstalledModels, modelForTag, ollamaApiUrl, registerOllamaOnboardingHandlers, type ModelId } from './n2c-e-user-onboarding/n2c-e-user-onboarding-main.js'
 import { isSpringProjectPath, validateSpringStructure, type SpringDependency, type SpringStructureManifest, type SpringStructurePreview } from './n2c-e-gen-spring-structure/n2c-e-gen-spring-structure-main.js'
+import { springBootProjectType } from './n2c-e-gen-spring/n2c-e-gen-spring-project-type.js'
 const electronDirectory = path.dirname(fileURLToPath(import.meta.url))
 const execFileAsync = promisify(execFile)
 
@@ -65,101 +66,6 @@ interface GenerationStage {
   allowEmpty?: boolean
 }
 
-const springBootMetadataUrl = 'https://repo1.maven.org/maven2/org/springframework/boot/spring-boot-starter-parent/maven-metadata.xml'
-const fallbackSpringBootVersion = '4.1.1'
-const springInitializerUrl = 'https://start.spring.io/starter.zip'
-const initializerDependencyIds: Record<string, string> = {
-  'org.springframework.boot:spring-boot-starter-web': 'web',
-  'org.springframework.boot:spring-boot-starter-webflux': 'webflux',
-  'org.springframework.boot:spring-boot-starter-data-jpa': 'data-jpa',
-  'org.springframework.boot:spring-boot-starter-validation': 'validation',
-  'org.springframework.boot:spring-boot-starter-security': 'security',
-  'org.springframework.boot:spring-boot-starter-test': 'test',
-  'org.projectlombok:lombok': 'lombok',
-  'com.h2database:h2': 'h2',
-  'org.postgresql:postgresql': 'postgresql',
-  'com.mysql:mysql-connector-j': 'mysql',
-  'org.springframework.boot:spring-boot-starter-actuator': 'actuator',
-}
-
-function compareVersions(left: string, right: string): number {
-  const leftParts = left.split('.').map(Number)
-  const rightParts = right.split('.').map(Number)
-  for (let index = 0; index < 3; index += 1) {
-    if ((leftParts[index] ?? 0) !== (rightParts[index] ?? 0)) return (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
-  }
-
-  return 0
-}
-
-function initializerDependencyIdsFor(structure: SpringStructureManifest): string[] {
-  return [...new Set(structure.dependencies
-    .map((dependency) => initializerDependencyIds[`${dependency.groupId}:${dependency.artifactId}`])
-    .filter((id): id is string => Boolean(id)))]
-}
-
-async function initializeWithSpringInitializer(projectPath: string, projectName: string, structure: SpringStructureManifest, springBootVersion: string): Promise<void> {
-  const dependencies = initializerDependencyIdsFor(structure)
-  const params = new URLSearchParams({
-    type: 'maven-project',
-    language: 'java',
-    bootVersion: springBootVersion,
-    baseDir: projectName,
-    groupId: structure.packageName,
-    artifactId: projectName,
-    name: projectName,
-    packageName: structure.packageName,
-    javaVersion: '21',
-    dependencies: dependencies.join(','),
-  })
-  let response: Response
-  try {
-    response = await fetch(`${springInitializerUrl}?${params.toString()}`)
-  } catch (cause) {
-    throw new Error(`Spring Initializr could not be reached. Check your internet connection and try again. ${cause instanceof Error ? cause.message : ''}`, { cause })
-  }
-  if (!response.ok) {
-    const detail = await response.text()
-    throw new Error(`Spring Initializr rejected the starter request (${response.status}). ${detail || 'Check the selected dependencies.'}`)
-  }
-  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'node-to-code-initializr-'))
-  const archivePath = path.join(tempRoot, 'starter.zip')
-  const extractPath = path.join(tempRoot, 'extracted')
-  try {
-    const archive = Buffer.from(await response.arrayBuffer())
-    if (archive.length < 4 || archive[0] !== 0x50 || archive[1] !== 0x4b) {
-      throw new Error('Spring Initializr returned an invalid starter archive. Please try again.')
-    }
-    await fs.writeFile(archivePath, archive)
-    await fs.mkdir(extractPath, { recursive: true })
-    const extractionScript = '& { param([string] $archivePath, [string] $destinationPath); Expand-Archive -LiteralPath $archivePath -DestinationPath $destinationPath -Force }'
-    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', extractionScript, archivePath, extractPath], { windowsHide: true })
-    const starterRoot = path.join(extractPath, projectName)
-    try {
-      await fs.access(starterRoot)
-    } catch (cause) {
-      throw new Error(`Spring Initializr returned a starter with an unexpected layout. Expected "${projectName}" in the archive.`, { cause })
-    }
-    await fs.rm(projectPath, { recursive: true, force: true })
-    await fs.mkdir(path.dirname(projectPath), { recursive: true })
-    await fs.cp(starterRoot, projectPath, { recursive: true })
-  } finally {
-    await fs.rm(tempRoot, { recursive: true, force: true })
-  }
-}
-
-async function latestStableSpringBootVersion(): Promise<string> {
-  try {
-    const response = await fetch(springBootMetadataUrl)
-    if (!response.ok) throw new Error(`Maven metadata request failed with status ${response.status}.`)
-    const metadata = await response.text()
-    const versions = [...metadata.matchAll(/<version>(\d+\.\d+\.\d+)<\/version>/g)].map((match) => match[1])
-    return versions.sort(compareVersions).at(-1) ?? fallbackSpringBootVersion
-  } catch (cause) {
-    console.warn(`Could not resolve the latest Spring Boot release: ${cause instanceof Error ? cause.message : 'unknown error'}`)
-    return fallbackSpringBootVersion
-  }
-}
 
 async function chatWithModel(modelId: ModelId, messages: ChatMessage[], format?: 'json'): Promise<ChatResult> {
   await ensureOllamaRunning()
@@ -217,38 +123,107 @@ async function chatWithModel(modelId: ModelId, messages: ChatMessage[], format?:
   return { message: result.message }
 }
 
-async function streamGeneration(modelId: ModelId, messages: ChatMessage[], onProgress: (progress: GenerationProgress) => void, progressRange: { start: number; end: number }): Promise<string> {
+/**
+ * Stream raw text from Ollama for single-file generation.
+ * Does NOT use format:"json" — the model returns plain Java/text.
+ * num_predict: 4096 is enough for one class, and prevents the token-repeat abort.
+ */
+async function streamRawContent(
+  modelId: ModelId,
+  messages: ChatMessage[],
+  onProgress: (progress: GenerationProgress) => void,
+  progressLabel: string,
+  progressPercent: number,
+): Promise<string> {
   await ensureOllamaRunning()
   const model = modelForTag(modelId)
   const installedModels = await getInstalledModels()
-  if (!installedModels.includes(model.tag)) throw new Error(`The selected model "${model.tag}" is not installed in Ollama. Download it from the model switcher first.`)
+  if (!installedModels.includes(model.tag)) throw new Error(`The selected model "${model.tag}" is not installed in Ollama.`)
+  const ollamaBody = { model: model.tag, messages, stream: true, think: false, keep_alive: 0, options: { temperature: 0.15, num_ctx: 16384, num_predict: 4096, repeat_penalty: 1.1 } }
   let response: Response
   try {
-    response = await fetch(`${ollamaApiUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: model.tag, messages, stream: true, format: 'json', think: false, keep_alive: 0, options: { temperature: 0.1, num_ctx: 32768, num_predict: 12000 } }),
-    })
+    response = await fetch(`${ollamaApiUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ollamaBody) })
   } catch (cause) {
-    throw new Error(`Could not connect to Ollama while generating with ${model.tag}. Restart Ollama and try again. ${cause instanceof Error ? cause.message : ''}`, { cause })
+    throw new Error(`Could not connect to Ollama. ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
   }
   if (!response.ok) {
     const detail = await response.text()
-    if (/cuda|shared object initialization|llama-server process has terminated/i.test(detail)) {
-      response = await fetch(`${ollamaApiUrl}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: model.tag, messages, stream: true, format: 'json', think: false, keep_alive: 0, options: { temperature: 0.1, num_ctx: 32768, num_predict: 12000, num_gpu: 0 } }),
-      })
-      if (!response.ok) {
-        const cpuDetail = await response.text()
-        throw new Error(`Ollama generation failed with ${model.tag} using GPU or CPU fallback (${response.status}). ${cpuDetail || detail}`)
-      }
+    if (/cuda|shared object|llama-server/i.test(detail)) {
+      // CPU fallback
+      response = await fetch(`${ollamaApiUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...ollamaBody, options: { ...ollamaBody.options, num_gpu: 0 } }) })
+      if (!response.ok) throw new Error(`Ollama CPU fallback failed (${response.status}).`)
     } else {
-      throw new Error(`Ollama generation failed with ${model.tag} (${response.status}). ${detail || 'The model may be unavailable or still loading.'}`)
+      throw new Error(`Ollama request failed (${response.status}): ${detail}`)
     }
   }
-  if (!response.body) throw new Error(`Ollama generation returned no response body for ${model.tag}.`)
+  if (!response.body) throw new Error('Ollama returned no response body.')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let content = ''
+  onProgress({ phase: 'generating', percent: progressPercent, status: progressLabel })
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    buffer += decoder.decode(chunk.value, { stream: true })
+    const parts = buffer.split('\n')
+    buffer = parts.pop() ?? ''
+    for (const line of parts) {
+      if (!line.trim()) continue
+      try {
+        const item = JSON.parse(line) as { message?: { content?: string }; response?: string; error?: string; done?: boolean }
+        if (item.error) throw new Error(`Ollama error: ${item.error}`)
+        content += item.message?.content ?? item.response ?? ''
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Ollama error:')) throw err
+      }
+    }
+  }
+  if (buffer.trim()) {
+    try {
+      const item = JSON.parse(buffer) as { message?: { content?: string }; response?: string; error?: string }
+      if (item.error) throw new Error(`Ollama error: ${item.error}`)
+      content += item.message?.content ?? item.response ?? ''
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Ollama error:')) throw err
+    }
+  }
+  if (!content.trim()) throw new Error(`Ollama returned empty content for: ${progressLabel}`)
+  return content
+}
+
+/**
+ * Stream JSON-formatted batch generation from Ollama.
+ * Used only for config stage and repair fallback (when per-node is not applicable).
+ * num_predict: 8192 — larger budget for batch JSON but still capped.
+ */
+async function streamJsonGeneration(
+  modelId: ModelId,
+  messages: ChatMessage[],
+  onProgress: (progress: GenerationProgress) => void,
+  progressRange: { start: number; end: number },
+): Promise<string> {
+  await ensureOllamaRunning()
+  const model = modelForTag(modelId)
+  const installedModels = await getInstalledModels()
+  if (!installedModels.includes(model.tag)) throw new Error(`The selected model "${model.tag}" is not installed in Ollama.`)
+  const ollamaBody = { model: model.tag, messages, stream: true, format: 'json', think: false, keep_alive: 0, options: { temperature: 0.1, num_ctx: 16384, num_predict: 8192, repeat_penalty: 1.1 } }
+  let response: Response
+  try {
+    response = await fetch(`${ollamaApiUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ollamaBody) })
+  } catch (cause) {
+    throw new Error(`Could not connect to Ollama. ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+  }
+  if (!response.ok) {
+    const detail = await response.text()
+    if (/cuda|shared object|llama-server/i.test(detail)) {
+      response = await fetch(`${ollamaApiUrl}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...ollamaBody, options: { ...ollamaBody.options, num_gpu: 0 } }) })
+      if (!response.ok) throw new Error(`Ollama CPU fallback failed (${response.status}).`)
+    } else {
+      throw new Error(`Ollama request failed (${response.status}): ${detail}`)
+    }
+  }
+  if (!response.body) throw new Error('Ollama returned no response body.')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -257,23 +232,31 @@ async function streamGeneration(modelId: ModelId, messages: ChatMessage[], onPro
     const chunk = await reader.read()
     if (chunk.done) break
     buffer += decoder.decode(chunk.value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-    for (const line of lines) {
+    const parts = buffer.split('\n')
+    buffer = parts.pop() ?? ''
+    for (const line of parts) {
       if (!line.trim()) continue
-      const item = JSON.parse(line) as { message?: { content?: string }; error?: string }
-      if (item.error) throw new Error(`Ollama generation failed: ${item.error}`)
-      content += item.message?.content ?? ''
-      const progress = progressRange.start + Math.min(progressRange.end - progressRange.start - 1, Math.round(content.length / 500))
-      onProgress({ phase: 'generating', percent: progress, status: 'Receiving generated files from the local model…' })
+      try {
+        const item = JSON.parse(line) as { message?: { content?: string }; response?: string; error?: string }
+        if (item.error) throw new Error(`Ollama error: ${item.error}`)
+        content += item.message?.content ?? item.response ?? ''
+        const pct = progressRange.start + Math.min(progressRange.end - progressRange.start - 1, Math.round(content.length / 300))
+        onProgress({ phase: 'generating', percent: pct, status: 'Generating from model...' })
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith('Ollama error:')) throw err
+      }
     }
   }
   if (buffer.trim()) {
-    const item = JSON.parse(buffer) as { message?: { content?: string }; error?: string }
-    if (item.error) throw new Error(`Ollama generation failed: ${item.error}`)
-    content += item.message?.content ?? ''
+    try {
+      const item = JSON.parse(buffer) as { message?: { content?: string }; response?: string; error?: string }
+      if (item.error) throw new Error(`Ollama error: ${item.error}`)
+      content += item.message?.content ?? item.response ?? ''
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('Ollama error:')) throw err
+    }
   }
-  if (!content.trim()) throw new Error('Ollama returned an empty generation response. The selected model may still be loading or may not support this request.')
+  if (!content.trim()) throw new Error('Ollama returned an empty generation response.')
   return content
 }
 
@@ -290,8 +273,8 @@ function registerChatHandler(): void {
 }
 
 function sanitizeProjectName(value: string): string {
-  const sanitized = value.trim().replace(/[<>:"/\\|?*]/g, '-').split('').filter((character) => character.charCodeAt(0) >= 32).join('').replace(/[. ]+$/g, '')
-  if (!sanitized || sanitized === '.' || sanitized === '..') throw new Error('Project name must contain at least one valid character.')
+  const sanitized = value.trim().replace(/[<>:"/\\\\|?*]/g, '-').replace(/\s+/g, '-').replace(/-{2,}/g, '-').replace(/^-|-$/g, '')
+  if (!sanitized || sanitized === '.' || sanitized === '..') return 'spring-boot-app'
   return sanitized.slice(0, 80)
 }
 
@@ -343,102 +326,7 @@ function parseGeneratedFiles(content: string, allowEmpty = false): GeneratedFile
     : file)
 }
 
-function generationStages(): GenerationStage[] {
-  return [
-    {
-      name: 'project foundation',
-      instructions: 'Spring Initializr has already created pom.xml, Maven wrapper files, the application class, and the starter layout. Do not generate, replace, or modify pom.xml, Maven wrapper files, or the application class. Generate only graph-specific application configuration files that are missing from the Initializr starter.',
-      allowEmpty: true,
-    },
-    {
-      name: 'models and repositories',
-      instructions: 'Generate the model/entity and repository/DAO files required by the graph, using the corresponding directories selected by the structure manifest. Do not generate services, controllers, or files already present in the structure manifest.',
-    },
-    {
-      name: 'service layer',
-      instructions: 'Generate the service files required by the graph in the service directory selected by the structure manifest. Services must use the generated model and repository types. Do not generate files already present in the structure manifest.',
-    },
-    {
-      name: 'controller layer',
-      instructions: 'Generate the REST controller files required by the graph in the controller directory selected by the structure manifest. Implement every API definition and connect controllers to generated services. Do not generate files already present in the structure manifest.',
-    },
-  ]
-}
-
-function stageContext(files: GeneratedFile[]): string {
-  if (!files.length) return 'No files have been generated yet.'
-  return files.map((file) => `FILE: ${file.path}\n${file.content}`).join('\n\n').slice(-60_000)
-}
-
-function buildContractSection(graph: GenerationGraph): string {
-  const lines: string[] = []
-  for (const node of graph.nodes) {
-    if (!node.data) continue
-    const parts: string[] = []
-    if (node.data.entityFields?.length) {
-      parts.push(`  Entity fields: ${node.data.entityFields.map(f => `${f.name}: ${f.type}${f.constraints?.length ? ` [${f.constraints.join(', ')}]` : ''}${f.relationship ? ` → ${f.relationship.type} ${f.relationship.target}` : ''}`).join('; ')}`)
-    }
-    if (node.data.apiContracts?.length) {
-      parts.push(`  API contracts: ${node.data.apiContracts.map(a => `${a.method} ${a.path}${a.requestBody ? ` body:${a.requestBody}` : ''}${a.responseType ? ` → ${a.responseType}` : ''}`).join('; ')}`)
-    }
-    if (node.data.serviceMethods?.length) {
-      parts.push(`  Service methods: ${node.data.serviceMethods.map(m => `${m.returnType ?? 'void'} ${m.name}(${m.params ?? ''}) — ${m.description}`).join('; ')}`)
-    }
-    if (node.data.configEntries?.length) {
-      parts.push(`  Config: ${node.data.configEntries.map(c => `${c.key}=${c.value ?? '<required>'}`).join('; ')}`)
-    }
-    if (parts.length > 0) {
-      lines.push(`Node "${node.data.label}" (${node.data.kind}):`)
-      lines.push(...parts)
-    }
-  }
-  if (lines.length === 0) return ''
-  return `\n\nNode contracts (implement these exactly):\n${lines.join('\n')}`
-}
-
-function buildStagePrompt(stage: GenerationStage, graph: GenerationGraph, files: GeneratedFile[], structure: SpringStructureManifest, springBootVersion: string): string {
-  const contractSection = buildContractSection(graph)
-  return `You are generating one stage of a Spring Boot project. This is a fresh context window: do not assume any earlier chat messages.
-
-Stage: ${stage.name}
-${stage.instructions}
-
-Project contract:
-- Use the package and directories from the structure manifest. Do not invent a different project layout.
-- Use the current stable Spring Boot release ${springBootVersion}. Use Java 21 syntax when this release requires it.
-- Spring Initializr created the authoritative pom.xml and dependency versions. Never generate or replace pom.xml.
-- Spring Initializr created the authoritative folder structure. Add files only inside directories already present or in directories required by the graph.
-- Generate graph-specific code only under src/main/java or src/test. Do not create root-level files or replace Initializr files.
-- Preserve names and API paths from the visual graph.
-- When node contracts specify entity fields, use exactly those field names and types. When API contracts specify request/response types, implement them precisely.
-- Return exactly one valid JSON object: {"files":[{"path":"relative/path","content":"file contents"}]}.
-- Return only files for this stage. Never return markdown fences, explanations, or text outside the JSON object.
-- Paths must be relative and use forward slashes.
-${contractSection}
-
-Visual graph:
-${JSON.stringify(graph, null, 2)}
-
-Complete structure manifest:
-${JSON.stringify(structure, null, 2)}
-
-Files already generated for context:
-${stageContext(files)}`
-}
-
-async function generateStage(modelId: ModelId, stage: GenerationStage, graph: GenerationGraph, files: GeneratedFile[], onProgress: (progress: GenerationProgress) => void, progressRange: { start: number; end: number }, structure: SpringStructureManifest, springBootVersion: string): Promise<GeneratedFile[]> {
-  const prompt = buildStagePrompt(stage, graph, files, structure, springBootVersion)
-  let response = ''
-  try {
-    response = await streamGeneration(modelId, [{ role: 'user', content: prompt }], onProgress, progressRange)
-    return parseGeneratedFiles(response, stage.allowEmpty)
-  } catch (cause) {
-    onProgress({ phase: 'generating', percent: progressRange.end - 1, status: `Repairing ${stage.name} response…` })
-    const repairPrompt = `Return only valid JSON in this exact shape: {"files":[{"path":"relative/path","content":"file contents"}]}. Repair the following response for the ${stage.name} stage. Do not add explanations or markdown. Use Spring Boot ${springBootVersion}; do not add explicit versions for dependencies managed by its parent.\n\n${response || (cause instanceof Error ? cause.message : 'The response was empty.')}`
-    const repaired = await streamGeneration(modelId, [{ role: 'user', content: repairPrompt }], onProgress, progressRange)
-    return parseGeneratedFiles(repaired, stage.allowEmpty)
-  }
-}
+// ── File I/O helpers ─────────────────────────────────────────────────────────
 
 async function writeGeneratedFiles(projectPath: string, files: GeneratedFile[]): Promise<void> {
   for (const file of files) {
@@ -470,29 +358,6 @@ async function collectProjectDirectories(projectPath: string, current = ''): Pro
   return directories
 }
 
-async function compileGeneratedProject(projectPath: string): Promise<{ success: boolean; available: boolean; output: string }> {
-  const commands = process.platform === 'win32'
-    ? [{ executable: 'cmd.exe', args: ['/d', '/s', '/c', 'mvn.cmd -q -DskipTests compile'], label: 'mvn.cmd' }]
-    : [{ executable: 'mvn', args: ['-q', '-DskipTests', 'compile'], label: 'mvn' }]
-  let lastError = 'Maven was not found.'
-  for (const command of commands) {
-    try {
-      const result = await execFileAsync(command.executable, command.args, { cwd: projectPath, timeout: 180_000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 })
-      return { success: true, available: true, output: `${result.stdout}\n${result.stderr}`.trim() }
-    } catch (cause) {
-      const error = cause as { code?: string | number; stdout?: string; stderr?: string; message?: string }
-      if (error.code === 'ENOENT') {
-        lastError = `${command.label} was not found.`
-        continue
-      }
-      const output = `${error.stdout ?? ''}\n${error.stderr ?? error.message ?? 'Maven compilation failed.'}`.trim()
-      if (/not recognized|could not find|not found/i.test(output)) return { success: false, available: false, output: `${command.label} was not found.` }
-      return { success: false, available: true, output }
-    }
-  }
-  return { success: false, available: false, output: lastError }
-}
-
 async function findVsCodeCommand(): Promise<string | undefined> {
   const localAppData = process.env.LOCALAPPDATA ?? path.join(os.homedir(), 'AppData', 'Local')
   const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files'
@@ -503,17 +368,12 @@ async function findVsCodeCommand(): Promise<string | undefined> {
   ]
   try {
     const { stdout } = await execFileAsync('where.exe', ['code.cmd'])
-    candidates.unshift(...stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))
+    candidates.unshift(...stdout.split(/\r?\n/).map((v) => v.trim()).filter(Boolean))
   } catch {
-    // Fall back to the standard per-user and machine installation paths.
+    // Fall back to standard installation paths.
   }
   for (const candidate of [...new Set(candidates)]) {
-    try {
-      await fs.access(candidate)
-      return candidate
-    } catch {
-      continue
-    }
+    try { await fs.access(candidate); return candidate } catch { continue }
   }
   return undefined
 }
@@ -528,22 +388,16 @@ async function openInVsCode(projectPath: string): Promise<{ opened: boolean; mes
     try {
       await fs.access(executable)
       await new Promise<void>((resolve, reject) => {
-        const process = spawn(executable, [projectPath], { detached: true, windowsHide: true, stdio: 'ignore' })
-        process.once('error', reject)
-        process.once('spawn', () => {
-          process.unref()
-          resolve()
-        })
+        const proc = spawn(executable, [projectPath], { detached: true, windowsHide: true, stdio: 'ignore' })
+        proc.once('error', reject)
+        proc.once('spawn', () => { proc.unref(); resolve() })
       })
     } catch (executableCause) {
       if (!command.toLowerCase().endsWith('.cmd')) throw executableCause
       await new Promise<void>((resolve, reject) => {
-        const process = spawn('cmd.exe', ['/d', '/c', 'call', command, projectPath], { detached: true, windowsHide: true, stdio: 'ignore' })
-        process.once('error', reject)
-        process.once('spawn', () => {
-          process.unref()
-          resolve()
-        })
+        const proc = spawn('cmd.exe', ['/d', '/c', 'call', command, projectPath], { detached: true, windowsHide: true, stdio: 'ignore' })
+        proc.once('error', reject)
+        proc.once('spawn', () => { proc.unref(); resolve() })
       })
     }
     return { opened: true }
@@ -552,73 +406,203 @@ async function openInVsCode(projectPath: string): Promise<{ opened: boolean; mes
   }
 }
 
-async function generateProject(modelId: ModelId, projectName: string, graph: GenerationGraph, projectPath: string, structure: SpringStructureManifest, window: BrowserWindow): Promise<GenerationResult> {
+// ─── Per-node segmented generation engine ────────────────────────────────────
+
+/**
+ * Generate a single file for one NodeGenerationJob.
+ * Makes ONE focused LLM call returning raw Java/text content.
+ * Retries once with a simplified prompt if the first attempt fails validation.
+ */
+async function generateOneNode(
+  modelId: ModelId,
+  job: import('./n2c-e-gen-core/n2c-e-gen-project-type.js').NodeGenerationJob,
+  graph: GenerationGraph,
+  files: GeneratedFile[],
+  config: { name: string; packageName: string; dependencies: Array<{ groupId: string; artifactId: string; version?: string; scope?: string }> },
+  onProgress: (p: GenerationProgress) => void,
+  progressPercent: number,
+): Promise<GeneratedFile | null> {
+  const prompt = springBootProjectType.buildNodePrompt(job, graph, files, config)
+  const maxAttempts = 2
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const raw = await streamRawContent(
+        modelId,
+        [{ role: 'user', content: attempt === 0 ? prompt : `${prompt}\n\nIMPORTANT: Output ONLY the Java source code for ${job.targetPath.split('/').pop()}. Start with "package ".` }],
+        onProgress,
+        job.progressLabel,
+        progressPercent,
+      )
+      return springBootProjectType.parseNodeResponse(raw, job)
+    } catch (cause) {
+      if (attempt === maxAttempts - 1) {
+        console.warn(`[n2c] Skipping ${job.targetPath}: ${cause instanceof Error ? cause.message : String(cause)}`)
+        return null
+      }
+      // Attempt 2: try without context
+    }
+  }
+  return null
+}
+
+/**
+ * Generate a full config stage using the batch JSON approach (small output, allowEmpty).
+ */
+async function generateConfigStage(
+  modelId: ModelId,
+  graph: GenerationGraph,
+  config: { name: string; packageName: string; dependencies: Array<{ groupId: string; artifactId: string; version?: string; scope?: string }> },
+  onProgress: (p: GenerationProgress) => void,
+  progressRange: { start: number; end: number },
+): Promise<GeneratedFile[]> {
+  const stage = springBootProjectType.generationStages()[0]  // config stage
+  const prompt = springBootProjectType.buildStageFallbackPrompt(stage, graph, config)
+  try {
+    const raw = await streamJsonGeneration(modelId, [{ role: 'user', content: prompt }], onProgress, progressRange)
+    return parseGeneratedFiles(raw, true)
+  } catch {
+    return []  // config stage is optional
+  }
+}
+
+/**
+ * Main per-node generation loop.
+ * For each stage, decomposes it into jobs and calls generateOneNode per job.
+ * Progress is updated per-file so the UI shows smooth granular progress.
+ */
+async function generateProject(
+  modelId: ModelId,
+  projectName: string,
+  graph: GenerationGraph,
+  projectPath: string,
+  structure: SpringStructureManifest,
+  window: BrowserWindow,
+): Promise<GenerationResult> {
   modelForTag(modelId)
   if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) throw new Error('Invalid project graph.')
   if (!isSpringProjectPath(projectPath)) throw new Error('Invalid prepared Spring project path.')
-  const sendProgress = (progress: GenerationProgress) => {
-    if (!window.isDestroyed()) window.webContents.send('project:generation-progress', progress)
-  }
-  sendProgress({ phase: 'preparing', percent: 5, status: 'Preparing segmented Java project generation…' })
+  const sendProgress = (p: GenerationProgress) => { if (!window.isDestroyed()) window.webContents.send('project:generation-progress', p) }
+  sendProgress({ phase: 'preparing', percent: 5, status: 'Starting per-node segmented generation...' })
+
   const validatedStructure = validateSpringStructure(structure)
-  const files: GeneratedFile[] = [...validatedStructure.files]
-  const stages = generationStages()
-  const springBootVersion = await latestStableSpringBootVersion()
+  const config = { name: projectName, packageName: validatedStructure.packageName, dependencies: validatedStructure.dependencies }
+
+  // Pre-warm Spring Boot version cache
+  await springBootProjectType.resolvedVersion()
+
+  // Collect Initializr scaffold files
   const starterFiles = await collectProjectFiles(projectPath)
-  files.push(...starterFiles)
-  const starterPaths = new Set(starterFiles.map((file) => file.path))
-  for (const [index, stage] of stages.entries()) {
-    const startPercent = 10 + Math.round((index / stages.length) * 65)
-    const endPercent = 10 + Math.round(((index + 1) / stages.length) * 65)
-    sendProgress({ phase: 'generating', percent: startPercent, status: `Generating ${stage.name} in a fresh context…` })
-    const stageFiles = (await generateStage(modelId, stage, graph, files, sendProgress, { start: startPercent, end: endPercent }, validatedStructure, springBootVersion))
-      .filter((file) => !['pom.xml', 'mvnw', 'mvnw.cmd'].includes(file.path) && !file.path.startsWith('.mvn/'))
-      .filter((file) => !starterPaths.has(file.path))
-    for (const file of stageFiles) {
-      const existingIndex = files.findIndex((existing) => existing.path === file.path)
-      if (existingIndex >= 0) files[existingIndex] = file
-      else files.push(file)
+  const protectedPaths = new Set(springBootProjectType.protectedPaths())
+  const starterPaths = new Set(starterFiles.map(f => f.path))
+
+  // Accumulated files: start with structure files + scaffold
+  const allFiles: GeneratedFile[] = [...validatedStructure.files, ...starterFiles]
+
+  // Build full job list across all stages
+  const stages = springBootProjectType.generationStages()
+  const allJobs: Array<{ stageIdx: number; stageName: string; job: import('./n2c-e-gen-core/n2c-e-gen-project-type.js').NodeGenerationJob }> = []
+  for (const [i, stage] of stages.entries()) {
+    if (stage.name === 'application config') continue  // handled separately
+    const jobs = springBootProjectType.buildNodeJobs(stage, graph, config)
+    for (const job of jobs) allJobs.push({ stageIdx: i, stageName: stage.name, job })
+  }
+
+  // Estimate total progress: 10% prepare + 65% generation + 10% config + 15% write+compile
+  const totalJobs = allJobs.length || 1
+
+  // Phase 1: config stage (batch, small)
+  sendProgress({ phase: 'generating', percent: 10, status: 'Generating application config...' })
+  const configFiles = await generateConfigStage(modelId, graph, config, sendProgress, { start: 10, end: 18 })
+  for (const f of configFiles) {
+    if (!protectedPaths.has(f.path) && !starterPaths.has(f.path)) {
+      const idx = allFiles.findIndex(e => e.path === f.path)
+      if (idx >= 0) allFiles[idx] = f; else allFiles.push(f)
     }
   }
+
+  // Phase 2: per-node generation
+  const generatedFiles: GeneratedFile[] = []
+  for (const [jobIdx, { stageName, job }] of allJobs.entries()) {
+    const percent = 18 + Math.round((jobIdx / totalJobs) * 57)  // 18% to 75%
+    sendProgress({ phase: 'generating', percent, status: `[${jobIdx + 1}/${totalJobs}] ${job.progressLabel}` })
+    // Send stage-level event for the IDE progress panel
+    if (!window.isDestroyed()) {
+      window.webContents.send('project:stage-progress', {
+        stageName,
+        stageFile: job.targetPath.split('/').pop(),
+        jobIndex: jobIdx,
+        totalJobs,
+      })
+    }
+    const file = await generateOneNode(modelId, job, graph, allFiles, config, sendProgress, percent)
+    if (file) {
+      generatedFiles.push(file)
+      // Add to context immediately so next jobs can reference this class
+      const idx = allFiles.findIndex(e => e.path === file.path)
+      if (idx >= 0) allFiles[idx] = file; else allFiles.push(file)
+    }
+  }
+
+  // Phase 3: validate and sanitise all file paths
+  sendProgress({ phase: 'writing', percent: 76, status: 'Writing generated files to disk...' })
   const safeFiles: GeneratedFile[] = []
   const seenPaths = new Set<string>()
-  for (const file of files) {
-    const relativePath = file.path.replace(/\\/g, '/')
-    if (!relativePath || path.posix.isAbsolute(relativePath) || relativePath.split('/').includes('..') || relativePath.includes(':')) {
-      throw new Error(`The model returned an unsafe file path: ${file.path}`)
+  const allToWrite = [...configFiles, ...generatedFiles]
+  for (const file of allToWrite) {
+    const relativePath = file.path.replace(/\\\\/g, '/')
+    if (!relativePath) continue
+    if (path.posix.isAbsolute(relativePath) || relativePath.split('/').includes('..') || relativePath.includes(':')) {
+      console.warn(`[n2c] Skipping unsafe path: ${relativePath}`); continue
     }
-    if (seenPaths.has(relativePath)) throw new Error(`The model returned a duplicate file path: ${relativePath}`)
+    if (protectedPaths.has(relativePath) || [...protectedPaths].some(p => p.endsWith('/') && relativePath.startsWith(p))) continue
+    if (starterPaths.has(relativePath)) continue
+    if (seenPaths.has(relativePath)) continue
     seenPaths.add(relativePath)
-    const destination = path.join(projectPath, ...relativePath.split('/'))
-    if (!destination.toLowerCase().startsWith(`${projectPath.toLowerCase()}${path.sep}`)) throw new Error(`The model returned an unsafe file path: ${file.path}`)
+    const dest = path.join(projectPath, ...relativePath.split('/'))
+    if (!dest.toLowerCase().startsWith(`${projectPath.toLowerCase()}${path.sep}`)) {
+      console.warn(`[n2c] Skipping path that escapes project root: ${relativePath}`); continue
+    }
     safeFiles.push({ path: relativePath, content: file.content })
   }
-  sendProgress({ phase: 'writing', percent: 76, status: `Writing ${safeFiles.length} generated files…`, totalFiles: safeFiles.length, filesWritten: 0 })
+
   await writeGeneratedFiles(projectPath, safeFiles)
-  sendProgress({ phase: 'writing', percent: 82, status: 'Compiling generated Java sources…', totalFiles: safeFiles.length, filesWritten: safeFiles.length })
-  let compilation = await compileGeneratedProject(projectPath)
-  if (!compilation.success && compilation.available) {
-    sendProgress({ phase: 'generating', percent: 84, status: 'Repairing generated code from compiler diagnostics…' })
-    const repairStage: GenerationStage = {
-      name: 'compiler repair',
-      instructions: `Fix the existing generated project so Maven compilation succeeds. Return only files that must change. Compiler output:\n${compilation.output}`,
+
+  // Persist node structure inside the generated project
+  try {
+    const metaDir = path.join(projectPath, '.nodetocode')
+    await fs.mkdir(metaDir, { recursive: true })
+    const structureManifest = {
+      projectName,
+      packageName: validatedStructure.packageName,
+      generatedAt: new Date().toISOString(),
+      nodes: graph.nodes,
+      edges: graph.edges,
+      dependencies: validatedStructure.dependencies,
     }
-    const repairFiles = await generateStage(modelId, repairStage, graph, safeFiles, sendProgress, { start: 84, end: 96 }, validatedStructure, springBootVersion)
-    for (const file of repairFiles) {
-      const existingIndex = safeFiles.findIndex((existing) => existing.path === file.path)
-      if (existingIndex >= 0) safeFiles[existingIndex] = file
-      else safeFiles.push(file)
-    }
-    await writeGeneratedFiles(projectPath, safeFiles)
-    compilation = await compileGeneratedProject(projectPath)
+    await fs.writeFile(path.join(metaDir, 'graph.json'), JSON.stringify(structureManifest, null, 2), 'utf8')
+    await fs.writeFile(path.join(projectPath, 'node-structure.json'), JSON.stringify(structureManifest, null, 2), 'utf8')
+  } catch (err) {
+    console.warn('[n2c] Failed to save node-structure.json:', err)
   }
-  if (!compilation.success && compilation.available) {
-    throw new Error(`Generated project did not compile. ${compilation.output.slice(-4000)}`)
-  }
+
+  sendProgress({ phase: 'writing', percent: 95, status: `Wrote ${safeFiles.length} files to disk.`, totalFiles: safeFiles.length, filesWritten: safeFiles.length })
+
+  // Phase 4: Compilation and repair phase is skipped for now per configuration.
+  // All generated files are retained and kept on disk regardless of compilation status.
   const editor = await openInVsCode(projectPath)
-  const compilerMessage = compilation.available ? undefined : 'Maven was not found, so compilation could not be verified. Install Maven and run mvn compile in the generated project.'
-  sendProgress({ phase: 'complete', percent: 100, status: compilerMessage ? 'Project generated; Maven compilation was not available.' : 'Project generated, compiled, and ready in VS Code.', totalFiles: safeFiles.length, filesWritten: safeFiles.length })
-  return { projectPath, files: safeFiles, editorOpened: editor.opened, editorMessage: [editor.message, compilerMessage].filter(Boolean).join(' ') || undefined }
+  sendProgress({
+    phase: 'complete',
+    percent: 100,
+    status: `Project generated: ${safeFiles.length} files ready.`,
+    totalFiles: safeFiles.length,
+    filesWritten: safeFiles.length,
+  })
+  return {
+    projectPath,
+    files: safeFiles,
+    editorOpened: editor.opened,
+    editorMessage: editor.message,
+  }
 }
 
 function registerGenerationHandler(): void {
@@ -634,9 +618,9 @@ function registerGenerationHandler(): void {
     const safeName = sanitizeProjectName(projectName)
     const packageName = `com.nodetocode.${safeName.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'app'}`
     const structure = validateSpringStructure({ packageName, directories: [], files: [], dependencies })
-    const springBootVersion = await latestStableSpringBootVersion()
-    sendProgress({ phase: 'preparing', percent: 20, status: 'Downloading the Spring Initializr starter…' })
-    await initializeWithSpringInitializer(path.join('C:', 'nodetocode', 'projects', safeName), safeName, structure, springBootVersion)
+    sendProgress({ phase: 'preparing', percent: 20, status: 'Downloading the Spring Initializr starter...' })
+    const projectConfig = { name: safeName, packageName: structure.packageName, dependencies: structure.dependencies }
+    await springBootProjectType.initializeProject(path.join('C:', 'nodetocode', 'projects', safeName), projectConfig)
     const projectPath = path.join('C:', 'nodetocode', 'projects', safeName)
     const directories = await collectProjectDirectories(projectPath)
     sendProgress({ phase: 'preparing', percent: 100, status: 'Folder structure ready for review.' })
@@ -657,6 +641,27 @@ function registerGenerationHandler(): void {
     const zipPath = `${projectPath}.zip`
     await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Compress-Archive -Path $args[0] -DestinationPath $args[1] -Force', '-Args', projectPath, zipPath], { windowsHide: true })
     return zipPath
+  })
+  ipcMain.handle('project:load-graph', async (_event, projectPath: string) => {
+    if (!path.isAbsolute(projectPath)) throw new Error('Invalid project path.')
+    const filePath = path.join(projectPath, 'node-structure.json')
+    try {
+      const data = await fs.readFile(filePath, 'utf8')
+      return JSON.parse(data)
+    } catch {
+      return null
+    }
+  })
+  ipcMain.handle('project:compile', async (_event, projectPath: string) => {
+    if (!path.isAbsolute(projectPath)) throw new Error('Invalid project path.')
+    const compilation = await springBootProjectType.compileProject(projectPath)
+    const diagnostics = springBootProjectType.parseBuildDiagnostics(compilation.output)
+    return {
+      success: compilation.success,
+      available: compilation.available,
+      diagnostics: diagnostics.map(d => ({ file: d.file, line: d.line, message: d.message, severity: 'error' as const })),
+      rawOutput: compilation.output,
+    }
   })
 }
 
